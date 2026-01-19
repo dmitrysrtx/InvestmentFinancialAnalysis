@@ -1,4 +1,5 @@
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, max
 from pyspark.ml.feature import VectorAssembler, StandardScaler
 from pyspark.ml.classification import RandomForestClassifier
 from pyspark.ml.evaluation import MulticlassClassificationEvaluator
@@ -39,8 +40,13 @@ df_ready = scaler_model.transform(df_vector)
 data = df_ready.select("ticker", "year", "features", "label")
 
 # --- 3. TRAIN/TEST SPLIT ---
-# 80% for training, 20% for testing
-train_data, test_data = data.randomSplit([0.8, 0.2], seed=42)
+# Use the most recent year for testing
+print("Splitting data by year...")
+max_year = data.select(max("year")).first()[0]
+print(f"Using year {max_year} for testing.")
+
+train_data = data.filter(col("year") < max_year)
+test_data = data.filter(col("year") == max_year)
 
 print(f"Training on {train_data.count()} records.")
 print(f"Testing on {test_data.count()} records.")
