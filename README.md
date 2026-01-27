@@ -1,33 +1,106 @@
-# Financial Health Prediction System using Apache Spark & Kafka
+# Real-Time Financial Health Analysis (Altman Z-Score)
 
-## 📌 Project Overview
-This project is a semester assignment for the **Apache Spark** course. It demonstrates a complete Data Engineering and Machine Learning pipeline that simulates the processing of financial reports to predict the investment potential of technology companies.
+==============================================================================
+DESCRIPTION
+==============================================================================
+This project implements a distributed system for assessing the financial health 
+of companies using the **Altman Z-Score** model. 
 
-The system ingests historical financial data (simulating a real-time stream), processes it using **Apache Spark**, calculates key financial ratios (Fundamental Analysis), and trains a **Random Forest** model to classify companies as "Healthy" (Buy) or "Unhealthy" (Avoid).
+Instead of training a "black box" Machine Learning model, we implement a 
+deterministic financial formula within **Apache Spark Structured Streaming**. 
+The system processes simulated real-time streams of financial reports (10-K), 
+calculates the Z-Score coefficients on-the-fly, and classifies companies into 
+Safe, Grey, or Distress zones.
 
-## 🚀 Architecture
-The pipeline consists of three main components:
+**Architecture:**
+1. **Data Source (Student 1):** Raw PDF/HTML reports parsed into structured CSV.
+2. **Stream Producer (Python):** Simulates real-time arrival of reports via Kafka.
+3. **Analysis Engine (Spark):** Consumes stream, computes Z-Score, and assigns ratings.
 
-1.  **Data Ingestion (Producer):**
-    * Fetches historical financial data (Balance Sheet, Income Statement) using `yfinance`.
-    * Streams data as JSON events into an **Apache Kafka** topic (`financial_reports_stream`).
-2.  **ETL & Processing (Spark Core/SQL):**
-    * Consumes data from Kafka.
-    * Performs **Feature Engineering**: Calculates financial ratios (ROE, ROA, Current Ratio, etc.).
-    * Performs **Data Labeling**: Compares the stock price at the time of the report with the price *one year later*. If the return is > 5%, the label is set to `1` (Healthy).
-    * Saves the processed dataset to Parquet format.
-3.  **Machine Learning (Spark MLlib):**
-    * Loads the Parquet data.
-    * Trains a **Random Forest Classifier**.
-    * Evaluates the model's accuracy in predicting future company performance based on financial ratios.
+==============================================================================
+THE ALTMAN Z-SCORE MODEL
+==============================================================================
+The system calculates the following coefficients based on raw financial data:
 
-## 🛠️ Prerequisites
+* **X1:** Working Capital / Total Assets
+* **X2:** Retained Earnings / Total Assets
+* **X3:** EBIT / Total Assets
+* **X4:** Market Value of Equity / Total Liabilities
+* **X5:** Sales / Total Assets
 
-* **Python 3.8+**
-* **Apache Kafka**
-* **Apache Spark 3.x**
-* **Java 8/11** (Required for Spark/Kafka)
+**Formula:** `Z = 1.2(X1) + 1.4(X2) + 3.3(X3) + 0.6(X4) + 1.0(X5)`
 
-### Python Dependencies
-```bash
-pip install yfinance kafka-python pyspark numpy pandas
+**Classification Zones:**
+* 🟢 **Safe Zone:** Z > 2.99
+* 🟡 **Grey Zone:** 1.81 < Z < 2.99
+* 🔴 **Distress Zone:** Z < 1.81
+
+==============================================================================
+PREREQUISITES
+==============================================================================
+1.  **Environment:** Linux / VLAB (College Environment).
+2.  **Kafka Location:** `/usr/local/kafka/kafka_2.13-3.2.1`
+3.  **Python Libraries:** `kafka-python`, `pyspark`.
+
+==============================================================================
+EXECUTION INSTRUCTIONS
+==============================================================================
+
+STEP 0: CONFIGURE AND START KAFKA
+---------------------------------
+1.  Navigate to the Kafka directory:
+    cd /usr/local/kafka/kafka_2.13-3.2.1
+
+2.  FIX CONFIGURATION (One-time setup):
+    sed -i 's|#listeners=PLAINTEXT://:9092|listeners=PLAINTEXT://:9092|' config/server.properties
+
+3.  Start Zookeeper (Terminal 1):
+    bin/zookeeper-server-start.sh config/zookeeper.properties
+
+4.  Start Kafka Server (Terminal 2):
+    bin/kafka-server-start.sh config/server.properties
+    (Wait 15 seconds for initialization)
+
+5.  Create the Topic (Terminal 3):
+    bin/kafka-topics.sh --create --topic financial_reports_stream --bootstrap-server localhost:9092
+
+------------------------------------------------------------------------------
+
+STEP 1: RUN DATA PRODUCER (TERMINAL 3)
+--------------------------------------
+This script reads the cleaned CSV dataset (prepared by Student 1) and streams 
+it to Kafka to simulate real-time reporting events.
+
+1.  Navigate to your project folder:
+    cd /path/to/project
+
+2.  Run the producer:
+    python3 producer.py
+
+    > Output: "Sent: AAPL - 2022", "Sent: MSFT - 2023"...
+
+------------------------------------------------------------------------------
+
+STEP 2: RUN SPARK ALTMAN ANALYSIS (TERMINAL 4)
+----------------------------------------------
+This is the main analysis job. It reads from Kafka, calculates the 5 coefficients, 
+applies the Z-Score formula, and outputs the Health Rating.
+
+1.  Run the Spark job (ensure the package version matches your environment):
+    
+    spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.2.1 spark_altman.py
+
+    > **Output:** The console will display a real-time updating table:
+    > +------+----+-------+-------------+-----+-----+
+    > |ticker|year|Z_Score|Health_Zone  |X1   |X2   |
+    > +------+----+-------+-------------+-----+-----+
+    > |AAPL  |2023|4.56   |Safe (Green) |0.4  |0.5  |
+    > |ZOMB  |2023|1.10   |Distress (Red)|-0.2 |...  |
+    > +------+----+-------+-------------+-----+-----+
+
+==============================================================================
+AUTHORS
+==============================================================================
+* **Student 1:** Raw Data Collection & PDF Parsing (ETL to CSV)
+* **Student 2:** Kafka Streaming, Spark Implementation & Z-Score Analysis
+* **Student 3:** Literature Review & Methodology Selection
