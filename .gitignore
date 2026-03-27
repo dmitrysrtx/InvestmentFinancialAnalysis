@@ -9,3 +9,5 @@ bash_scripts
 
 logs/*
 !logs/README.md
+
+local_storage/*

@@ -6,6 +6,11 @@ RAW_FEATURES_SPARK_PUBLISHER_KAFKA_PORT ?= 9092
 RAW_FEATURES_SPARK_PUBLISHER_TARGET_KAFKA_CHANNEL ?= raw_features
 PYTHON ?= /home/linuxu/anaconda3/bin/python
 company ?=
+# Year-range variables (used by run-producer and process targets)
+start_year ?=
+end_year ?=
+# Per-document (single-ticker) variable for run-producer
+ticker ?=
 assets_dir := $(RAW_FEATURES_SPARK_PUBLISHER_ASSETS)
 publisher_script := $(RAW_FEATURES_SPARK_PUBLISHER_ROOT)/raw_features_spark_publisher.py
 supported_component := raw_features
@@ -22,11 +27,13 @@ help:
 	@echo "  raw_features            Supported component. See actions below."
 	@echo "  run-altman-etl          Run spark_altman_etl.py."
 	@echo "  run-altman-zprime-etl   Run spark_altman_zprime_etl.py."
-	@echo "  run-producer            Run produser.py."
+	@echo "  run-producer            Run produser.py (Kafka producer)."
 	@echo ""
 	@echo "Actions for 'raw_features':"
 	@echo "  process                 Run raw_features_spark_publisher.py."
-	@echo "                          Optional: company=<ticker> (single-company mode)."
+	@echo "                          Optional: company=<ticker>   (single-company mode)."
+	@echo "                          Optional: start_year=<YYYY>  (default: 2015)."
+	@echo "                          Optional: end_year=<YYYY>    (default: no upper bound)."
 	@echo "  do_export               Zip assets dir to assets export archive."
 	@echo "  do_import               Import assets archive unless assets dir is non-empty."
 	@echo ""
@@ -38,15 +45,24 @@ help:
 	@echo "  RAW_FEATURES_SPARK_PUBLISHER_KAFKA_PORT            default: $(RAW_FEATURES_SPARK_PUBLISHER_KAFKA_PORT)"
 	@echo "  RAW_FEATURES_SPARK_PUBLISHER_TARGET_KAFKA_CHANNEL  default: $(RAW_FEATURES_SPARK_PUBLISHER_TARGET_KAFKA_CHANNEL)"
 	@echo "  PYTHON                                             default: $(PYTHON)"
+	@echo "  start_year                                         default: (unset → 2015)"
+	@echo "  end_year                                           default: (unset → no upper bound)"
+	@echo "  ticker                                             default: (unset → all tickers, run-producer only)"
 	@echo ""
 	@echo "Examples:"
 	@echo "  make raw_features process"
 	@echo "  make raw_features process company=aaoi"
+	@echo "  make raw_features process start_year=2015 end_year=2022"
+	@echo "  make raw_features process start_year=2023 end_year=2025"
+	@echo "  make raw_features process company=aaoi start_year=2018 end_year=2022"
 	@echo "  make raw_features do_export"
 	@echo "  make raw_features do_import"
 	@echo "  make run-altman-etl"
 	@echo "  make run-altman-zprime-etl"
 	@echo "  make run-producer"
+	@echo "  make run-producer start_year=2015 end_year=2022"
+	@echo "  make run-producer start_year=2023 end_year=2025"
+	@echo "  make run-producer ticker=AAPL start_year=2020 end_year=2022"
 
 raw_features:
 	@if [ "$(selected_component)" != "$(supported_component)" ]; then \
@@ -75,6 +91,8 @@ process: raw_features
 		RAW_FEATURES_SPARK_PUBLISHER_TARGET_KAFKA_CHANNEL="$(RAW_FEATURES_SPARK_PUBLISHER_TARGET_KAFKA_CHANNEL)" \
 		RAW_FEATURES_SPARK_PUBLISHER_ASSETS="$(RAW_FEATURES_SPARK_PUBLISHER_ASSETS)" \
 		RAW_FEATURES_SPARK_PUBLISHER_TARGET_COMPANY="$(company)" \
+		START_YEAR="$(start_year)" \
+		END_YEAR="$(end_year)" \
 		"$(PYTHON)" raw_features_spark_publisher.py; \
 	else \
 		echo "INFO: process mode full assets scan"; \
@@ -84,6 +102,8 @@ process: raw_features
 		RAW_FEATURES_SPARK_PUBLISHER_KAFKA_PORT="$(RAW_FEATURES_SPARK_PUBLISHER_KAFKA_PORT)" \
 		RAW_FEATURES_SPARK_PUBLISHER_TARGET_KAFKA_CHANNEL="$(RAW_FEATURES_SPARK_PUBLISHER_TARGET_KAFKA_CHANNEL)" \
 		RAW_FEATURES_SPARK_PUBLISHER_ASSETS="$(RAW_FEATURES_SPARK_PUBLISHER_ASSETS)" \
+		START_YEAR="$(start_year)" \
+		END_YEAR="$(end_year)" \
 		"$(PYTHON)" raw_features_spark_publisher.py; \
 	fi
 
@@ -134,6 +154,9 @@ run-altman-zprime-etl:
 	spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.0 spark_altman_zprime_etl.py
 
 run-producer:
+	START_YEAR="$(start_year)" \
+	END_YEAR="$(end_year)" \
+	TARGET_TICKER="$(ticker)" \
 	python3 produser.py
 
 demo-phase1:

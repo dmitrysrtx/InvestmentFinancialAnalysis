@@ -35,15 +35,51 @@ from src.raw_features.price import get_price
 
 MAIN_PROCESS_NAME = "RawFeaturesSparkPublisher"
 JOB_KEY_SEPARATOR = "@"
-FISCAL_YEAR_THRESHOLD = "2015"
+DEFAULT_START_YEAR = 2015
+DEFAULT_END_YEAR = None  # None means no upper bound
 
-def get_fiscal_year_threshold() -> int:
-  try:
-    return int(FISCAL_YEAR_THRESHOLD)
-  except ValueError as e:
+def get_year_range() -> tuple:
+  """Return (start_year: int, end_year: int | None) from env vars START_YEAR / END_YEAR.
+
+  START_YEAR defaults to DEFAULT_START_YEAR (2015).
+  END_YEAR defaults to None (no upper bound).
+  """
+  raw_start = os.getenv("START_YEAR", "").strip()
+  raw_end = os.getenv("END_YEAR", "").strip()
+
+  if raw_start:
+    try:
+      start_year = int(raw_start)
+    except ValueError as e:
+      raise ValueError(
+        f"START_YEAR must be a 4-digit year, got '{raw_start}'"
+      ) from e
+  else:
+    start_year = DEFAULT_START_YEAR
+
+  if raw_end:
+    try:
+      end_year = int(raw_end)
+    except ValueError as e:
+      raise ValueError(
+        f"END_YEAR must be a 4-digit year, got '{raw_end}'"
+      ) from e
+  else:
+    end_year = DEFAULT_END_YEAR
+
+  if end_year is not None and end_year < start_year:
     raise ValueError(
-      f"FISCAL_YEAR_THRESHOLD must be a 4-digit year, got '{FISCAL_YEAR_THRESHOLD}'"
-    ) from e
+      f"END_YEAR ({end_year}) must be >= START_YEAR ({start_year})"
+    )
+
+  return start_year, end_year
+
+# ---------------------------------------------------------------------------
+# Legacy helper kept for backward-compat (used by list_company_filings)
+# ---------------------------------------------------------------------------
+def get_fiscal_year_threshold() -> int:
+  start_year, _ = get_year_range()
+  return start_year
 
 def get_required_env_var(name: str) -> str:
   value = os.getenv(name)
@@ -85,8 +121,19 @@ def parse_job_key(job_key: str) -> Tuple[str, str]:
     return job_key, "unknown"
   return parts[0], parts[1]
 
-def list_company_filings(base_dir: str, target_company: str) -> List[Tuple[str, str]]:
-  fiscal_year_threshold = get_fiscal_year_threshold()
+def list_company_filings(
+  base_dir: str,
+  target_company: str,
+  start_year: Optional[int] = None,
+  end_year: Optional[int] = None,
+) -> List[Tuple[str, str]]:
+  """List filings for *target_company* within [start_year, end_year].
+
+  start_year defaults to DEFAULT_START_YEAR when None.
+  end_year=None means no upper bound.
+  """
+  if start_year is None:
+    start_year = DEFAULT_START_YEAR
   company = target_company.lower().strip()
   company_dir = os.path.join(base_dir, company)
   filings: List[Tuple[str, str]] = []
@@ -98,7 +145,10 @@ def list_company_filings(base_dir: str, target_company: str) -> List[Tuple[str, 
     fiscal_year = extract_fiscal_year(filename)
     if fiscal_year is None:
       continue
-    if int(fiscal_year) < fiscal_year_threshold:
+    fy_int = int(fiscal_year)
+    if fy_int < start_year:
+      continue
+    if end_year is not None and fy_int > end_year:
       continue
     job_key = build_job_key(company, fiscal_year)
     filings.append((job_key, os.path.join(company_dir, filename)))
@@ -114,13 +164,17 @@ def clean_raw_html_tables(output_dir: str) -> None:
         except OSError:
           continue
 
-def list_all_company_filings(base_dir: str) -> List[Tuple[str, str]]:
+def list_all_company_filings(
+  base_dir: str,
+  start_year: Optional[int] = None,
+  end_year: Optional[int] = None,
+) -> List[Tuple[str, str]]:
   filings: List[Tuple[str, str]] = []
   for dirname in sorted(os.listdir(base_dir)):
     company_dir = os.path.join(base_dir, dirname)
     if not os.path.isdir(company_dir):
       continue
-    filings.extend(list_company_filings(base_dir, dirname))
+    filings.extend(list_company_filings(base_dir, dirname, start_year=start_year, end_year=end_year))
   return filings
 
 def build_year_first_publish_records(
@@ -187,7 +241,7 @@ def build_year_first_publish_records(
   return ordered_records
 
 def main() -> None:
-  fiscal_year_threshold = get_fiscal_year_threshold()
+  start_year, end_year = get_year_range()
   assets_dir = get_required_env_var("RAW_FEATURES_SPARK_PUBLISHER_ASSETS")
   if not os.path.isabs(assets_dir):
     raise RuntimeError(
@@ -199,33 +253,43 @@ def main() -> None:
       f"{assets_dir}"
     )
 
+  year_range_label = (
+    "%s–%s" % (start_year, end_year) if end_year is not None
+    else "%s–present" % start_year
+  )
+
   target_company = os.getenv("RAW_FEATURES_SPARK_PUBLISHER_TARGET_COMPANY", "").strip()
   kafka_producer, kafka_channel = setup_kafka_channel()
   if target_company:
     log_message(
-      "Single target company mode enabled; processing company '%s' only" % (
-        target_company.upper()
+      "Single target company mode enabled; processing company '%s' only (years: %s)" % (
+        target_company.upper(),
+        year_range_label
       )
     )
-    filings = list_company_filings(assets_dir, target_company)
+    filings = list_company_filings(assets_dir, target_company, start_year=start_year, end_year=end_year)
   else:
-    log_message("Full process mode enabled; processing all companies under assets path")
-    filings = list_all_company_filings(assets_dir)
+    log_message(
+      "Full process mode enabled; processing all companies under assets path (years: %s)" % (
+        year_range_label
+      )
+    )
+    filings = list_all_company_filings(assets_dir, start_year=start_year, end_year=end_year)
   
   if not filings:
     if target_company:
       log_message(
-        "Company %s -- no filings to process at/after fiscal year threshold %s" % (
+        "Company %s -- no filings to process in year range %s" % (
           target_company.upper(),
-          str(fiscal_year_threshold)
+          year_range_label
         ),
         "ERROR"
       )
     else:
       log_message(
-        "No filings found under %s at/after fiscal year threshold %s" % (
+        "No filings found under %s in year range %s" % (
           assets_dir,
-          str(fiscal_year_threshold)
+          year_range_label
         ),
         "ERROR"
       )
@@ -238,20 +302,20 @@ def main() -> None:
   if target_company:
     log_message(
       "Will process %s 10-K filings for company %s with %s spark workers "
-      "(fiscal year threshold: %s)" % (
+      "(year range: %s)" % (
         str(len(filings)),
         target_company.upper(),
         str(num_slices),
-        str(fiscal_year_threshold)
+        year_range_label
       )
     )
   else:
     log_message(
       "Will process %s 10-K filings across all companies with %s spark workers "
-      "(fiscal year threshold: %s, assets path: %s)" % (
+      "(year range: %s, assets path: %s)" % (
         str(len(filings)),
         str(num_slices),
-        str(fiscal_year_threshold),
+        year_range_label,
         assets_dir
       )
     )
@@ -341,7 +405,8 @@ def main() -> None:
     combined_metrics = combine_metrics(
       balance_sheet_metrics=balance_sheet_metrics,
       cashflow_metrics=cashflow_metrics,
-      fiscal_year_threshold=fiscal_year_threshold,
+      fiscal_year_threshold=start_year,
+      fiscal_year_end=end_year,
       job_key_separator=JOB_KEY_SEPARATOR
     )
   except ValueError as e:

@@ -73,8 +73,14 @@ def _parse_metrics_by_filing(
 
 def merge_company_metric_frames(
   filing_metric_frames: List[Tuple[int, pd.DataFrame]],
-  fiscal_year_threshold: int
+  fiscal_year_threshold: int,
+  fiscal_year_end: Optional[int] = None,
 ) -> Dict[str, Dict[str, object]]:
+  """Merge per-filing DataFrames into a single consolidated metric dict.
+
+  Only years in [fiscal_year_threshold, fiscal_year_end] are included.
+  fiscal_year_end=None means no upper bound.
+  """
   metric_values: Dict[str, Dict[int, object]] = {}
   metric_units: Dict[str, Dict[int, Optional[str]]] = {}
   metric_order: List[str] = []
@@ -94,6 +100,8 @@ def merge_company_metric_frames(
         if metric_year is None:
           continue
         if metric_year < fiscal_year_threshold:
+          continue
+        if fiscal_year_end is not None and metric_year > fiscal_year_end:
           continue
 
         if metric_unit is not None and metric_year not in metric_units_by_year:
@@ -206,6 +214,7 @@ def combine_metrics(
   balance_sheet_metrics: Sequence[Tuple[str, str]],
   cashflow_metrics: Sequence[Tuple[str, str]],
   fiscal_year_threshold: int,
+  fiscal_year_end: Optional[int] = None,
   job_key_separator: str = "@"
 ) -> List[Tuple[str, str]]:
   balance_sheet_df_by_filing = _parse_metrics_by_filing(
@@ -248,7 +257,8 @@ def combine_metrics(
   for company in sorted(filings_by_company.keys()):
     consolidated_metrics = merge_company_metric_frames(
       filings_by_company[company],
-      fiscal_year_threshold
+      fiscal_year_threshold,
+      fiscal_year_end=fiscal_year_end,
     )
     if not consolidated_metrics:
       continue
