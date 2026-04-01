@@ -157,7 +157,8 @@ run-producer:
 	START_YEAR="$(start_year)" \
 	END_YEAR="$(end_year)" \
 	TARGET_TICKER="$(ticker)" \
-	python3 produser.py
+	RAW_FEATURES_SPARK_PUBLISHER_ROOT="$(RAW_FEATURES_SPARK_PUBLISHER_ROOT)" \
+	"$(PYTHON)" produser_api.py
 
 demo-phase1:
 	@echo "=== INITIATING PHASE 1: Historical Data Loading (2015-2020) ==="

@@ -20,12 +20,15 @@ Examples (via Makefile)
   make run-producer ticker=AAPL start_year=2020 end_year=2022
 """
 
+from __future__ import annotations
+
 import os
 import sys
 import time
 import json
+from typing import List, Optional, Tuple
+
 import yfinance as yf
-from kafka import KafkaProducer
 
 # --- CONFIGURATION ---
 KAFKA_BROKER = 'localhost:9092'
@@ -38,7 +41,7 @@ DEFAULT_START_YEAR = 2015
 DEFAULT_END_YEAR = None  # None means no upper bound
 
 
-def _parse_year_env(name: str, default) -> int | None:
+def _parse_year_env(name: str, default) -> Optional[int]:
     """Parse an integer year from an env var; return *default* if unset."""
     raw = os.getenv(name, "").strip()
     if not raw:
@@ -60,7 +63,7 @@ def get_year_range():
     return start_year, end_year
 
 
-def get_financials(ticker: str, start_year: int, end_year: int | None):
+def get_financials(ticker: str, start_year: int, end_year: Optional[int]):
     """Fetch financial data for *ticker* filtered to [start_year, end_year].
 
     Returns a list of dicts (one per qualifying fiscal year).
@@ -153,6 +156,37 @@ def get_financials(ticker: str, start_year: int, end_year: int | None):
         return []
 
 
+def setup_kafka_producer():
+    """Create a confluent_kafka Producer, mirroring the pattern in
+    raw_features_spark_publisher.setup_kafka_channel().
+
+    Reads KAFKA_HOST / KAFKA_PORT from env vars when available; otherwise
+    falls back to the module-level KAFKA_BROKER constant.
+    """
+    kafka_host = os.getenv("PRODUCER_API_KAFKA_HOST", "").strip()
+    kafka_port = os.getenv("PRODUCER_API_KAFKA_PORT", "").strip()
+    kafka_topic = os.getenv("PRODUCER_API_KAFKA_TOPIC", "").strip() or TOPIC_NAME
+
+    if kafka_host and kafka_port:
+        try:
+            int(kafka_port)
+        except ValueError:
+            print(f"ERROR: PRODUCER_API_KAFKA_PORT must be a valid integer, got '{kafka_port}'")
+            sys.exit(1)
+        bootstrap_servers = f"{kafka_host}:{kafka_port}"
+    else:
+        bootstrap_servers = KAFKA_BROKER
+
+    try:
+        from confluent_kafka import Producer
+    except ImportError:
+        print("ERROR: Missing dependency confluent_kafka. Install it (pip install confluent-kafka).")
+        sys.exit(1)
+
+    producer = Producer({"bootstrap.servers": bootstrap_servers})
+    return producer, kafka_topic
+
+
 if __name__ == "__main__":
     start_year, end_year = get_year_range()
 
@@ -170,18 +204,30 @@ if __name__ == "__main__":
     else:
         print(f"--- Starting Data Ingestion (all tickers, years: {year_range_label}) ---")
 
-    producer = KafkaProducer(
-        bootstrap_servers=[KAFKA_BROKER],
-        value_serializer=lambda x: json.dumps(x).encode('utf-8')
-    )
+    kafka_producer, kafka_topic = setup_kafka_producer()
 
+    total_sent = 0
     for ticker in tickers_to_process:
         reports = get_financials(ticker, start_year, end_year)
         for report in reports:
-            producer.send(TOPIC_NAME, value=report)
-            print(f"Sent: {ticker} - {report['year']}")
+            # Serialize to JSON bytes, use ticker as the message key
+            serialized_value = json.dumps(report)
+            kafka_producer.produce(
+                kafka_topic,
+                key=ticker.lower(),
+                value=serialized_value,
+            )
+            kafka_producer.poll(0)
+            total_sent += 1
+            print(
+                f"Published metrics for fiscal year {report['year']} "
+                f"-- company '{ticker}' to kafka topic '{kafka_topic}'"
+            )
             # Simulate real-time streaming delay
             time.sleep(0.2)
 
-    producer.flush()
-    print("--- Data Ingestion Complete ---")
+    kafka_producer.flush()
+    print(
+        f"--- Data Ingestion Complete: {total_sent} records "
+        f"published to '{kafka_topic}' ---"
+    )

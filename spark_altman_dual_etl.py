@@ -27,7 +27,7 @@ from src.raw_features.logger import log_message
 
 # --- CONFIGURATION CONSTANTS ---
 KAFKA_BROKER = "localhost:9092"
-INPUT_TOPIC = "raw_features" 
+INPUT_TOPIC = "financial_reports_stream" 
 APP_NAME = "Altman_Dual_Scoring_ETL"
 SILVER_STORAGE_PATH = "local_storage/silver_scores"
 
