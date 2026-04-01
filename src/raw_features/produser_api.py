@@ -110,25 +110,39 @@ def get_financials(ticker: str, start_year: int, end_year: int | None):
                     if not yearly_data.empty:
                         close_price = float(yearly_data['Close'].mean())
 
+                # Compute market cap from shares outstanding and close price
+                common_stock_units = get_val(balance_sheet, 'Ordinary Shares Number')
+                market_cap = close_price * common_stock_units
+
                 # Construct the data object
-                record = {
-                    'ticker': ticker,
-                    'year': year,
-                    'report_date': date_str,
-                    # --- Raw Values for Ratios ---
-                    'total_revenue': get_val(financials, 'Total Revenue'),
-                    'net_income': get_val(financials, 'Net Income'),
-                    'current_assets': get_val(balance_sheet, 'Current Assets'),
-                    'current_liabilities': get_val(balance_sheet, 'Current Liabilities'),
-                    'total_assets': get_val(balance_sheet, 'Total Assets'),
-                    'total_liabilities': get_val(balance_sheet, 'Total Liabilities Net Minority Interest'),
-                    'stockholders_equity': get_val(balance_sheet, 'Stockholders Equity'),
-                    'interest_expense': get_val(financials, 'Interest Expense'),
-                    'ebit': get_val(financials, 'EBIT'),
-                    # --- Price for Labeling ---
-                    'close_price': close_price
+                data = {
+                    # --- Metadata ---
+                    'ticker': ticker, # Stock ticker symbol
+                    'year': year,     # Financial year of the report
+                    
+                    # --- Income Statement Data (financials) ---
+                    'total_revenue': get_val(financials, 'Total Revenue'),      # Used for X5 (Sales/Total Assets)
+                    'net_income': get_val(financials, 'Net Income'),            # Overall profitability
+                    'ebit': get_val(financials, 'EBIT'),                        # Used for X3 (Operating efficiency)
+                    'interest_expense': get_val(financials, 'Interest Expense'), # Used for coverage analysis
+                    'tax_expense': get_val(financials, 'Tax Provision'),        # Tax paid (often labeled Tax Provision in yf)
+                    
+                    # --- Balance Sheet Data (balance_sheet) ---
+                    'current_assets': get_val(balance_sheet, 'Current Assets'),           # Used for X1 (Working Capital)
+                    'current_liabilities': get_val(balance_sheet, 'Current Liabilities'), # Used for X1 (Working Capital)
+                    'total_assets': get_val(balance_sheet, 'Total Assets'),               # Main denominator for all X-ratios
+                    'total_liabilities': get_val(balance_sheet, 'Total Liabilities Net Minority Interest'), # Used for X4 denominator
+                    'stockholders_equity': get_val(balance_sheet, 'Stockholders Equity'), # Used for X4 in Z-prime (Book Value)
+                    'retained_earnings': get_val(balance_sheet, 'Retained Earnings'),     # Used for X2 (Reinvested earnings)
+                    'short_term_debt': get_val(balance_sheet, 'Current Debt'),            # Part of total leverage
+                    'long_term_debt': get_val(balance_sheet, 'Long Term Debt'),           # Part of total leverage
+                    'common_stock_units': get_val(balance_sheet, 'Ordinary Shares Number'), # Needed for Market Cap calculation
+                    
+                    # --- Market Data ---
+                    'close_price': close_price, # Stock price at the end of the period
+                    'market_cap': market_cap    # Used for X4 in Z-original (Market Value of Equity)
                 }
-                data_points.append(record)
+                data_points.append(data)
             except Exception as e:
                 print(f"Skipping year {date.year} for {ticker}: {e}")
 

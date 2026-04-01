@@ -31,7 +31,6 @@ from src.raw_features.constants import (
   RAW_TABLES_DIR
 )
 from src.raw_features.logger import log_message
-from src.raw_features.price import get_price
 
 MAIN_PROCESS_NAME = "RawFeaturesSparkPublisher"
 JOB_KEY_SEPARATOR = "@"
@@ -208,12 +207,10 @@ def build_year_first_publish_records(
             units[metric_name] = unit
 
     for year, year_payload in metrics_by_year.items():
-      year_payload["price"] = get_price(ticker, year)
       units = year_payload.setdefault("units", {})
       if not isinstance(units, dict):
         units = {}
         year_payload["units"] = units
-      units["price"] = "$"
       rows_by_year.setdefault(year, []).append((ticker, year_payload))
 
   # --- Spark driver stage: normalise units → absolute values before Kafka ---

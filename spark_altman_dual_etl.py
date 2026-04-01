@@ -10,7 +10,8 @@ Features:
 import os
 import shutil
 from pyspark.sql import SparkSession, DataFrame
-from pyspark.sql.functions import col, from_json, when, lit, round, isnan
+from pyspark.sql.functions import col, from_json, when, lit, round, isnan, avg, stddev, abs, upper
+from pyspark.sql.window import Window
 from pyspark.sql.types import StructType, StructField, StringType, FloatType, IntegerType
 
 # Import the native logger from your project structure
@@ -21,6 +22,32 @@ KAFKA_BROKER = "localhost:9092"
 INPUT_TOPIC = "raw_features" 
 APP_NAME = "Altman_Dual_Scoring_ETL"
 SILVER_STORAGE_PATH = "local_storage/silver_scores"
+
+def enrich_with_analytics(df: DataFrame) -> DataFrame:
+    """
+    Advanced Analytics Step:
+    Calculates dynamic averages, standard deviations across the batch,
+    then assigns performance and anomaly flags based on Z_Score_Prime.
+    Z_Score_Prime is used because it is always available (does not require Market Cap).
+    """
+    stats_window = Window.partitionBy()
+
+    # 1. Calculate Statistics (Avg & StdDev) for Z_Score_Prime
+    df_stats = df \
+        .withColumn("Yearly_Avg_Z", round(avg("Z_Score_Prime").over(stats_window), 2)) \
+        .withColumn("Yearly_StdDev", round(stddev("Z_Score_Prime").over(stats_window), 2)) \
+        .na.fill(0.0, ["Yearly_StdDev"])
+
+    # 2. Apply Logic: Benchmarking, Anomaly Detection
+    return df_stats.withColumn(
+        "Performance",
+        when(col("Z_Score_Prime") > col("Yearly_Avg_Z"), "Outperforming")
+        .otherwise("Underperforming")
+    ).withColumn(
+        "Is_anomaly",
+        when(abs(col("Z_Score_Prime") - col("Yearly_Avg_Z")) > (lit(2) * col("Yearly_StdDev")), "Yes")
+        .otherwise("No")
+    ).drop("Yearly_Avg_Z", "Yearly_StdDev")
 
 def clean_silver_storage():
     """
@@ -47,7 +74,6 @@ def get_schema() -> StructType:
         StructField("interest_expense", FloatType(), True),
         StructField("tax_expense", FloatType(), True),
         StructField("total_revenue", FloatType(), True),
-        StructField("price", StringType(), True),
         StructField("market_cap", FloatType(), True),
     ])
 
@@ -78,19 +104,12 @@ def preprocess_and_engineer_features(df: DataFrame) -> DataFrame:
     on the producer side (normalize_units_before_kafka in combined_metrics.py)
     before records are published to Kafka, so values arrive already in absolute form.
 
-    Market-cap resolution (priority order):
-      1. cover_page_market_cap  – extracted directly from the 10-K cover page
-         (dei:EntityPublicFloat or text pattern); already in absolute dollars.
-      2. common_stock_units × price – fallback when cover-page value is absent.
+    Market-cap handling:
+      - If market_cap is present and positive, it is used for Z_Original.
+      - If market_cap is absent/invalid, Z_Original will be skipped (null)
+        and only Z_Prime will be calculated.
     """
-    # 1. Sanitize Price
-    df = df.withColumn(
-        "clean_price",
-        when(col("price") == "N/A", lit(None).cast("float"))
-        .otherwise(col("price").cast("float"))
-    )
-
-    # 2. Sanitize NaN/null financial fields → 0.0 (no unit scaling needed here)
+    # 1. Sanitize NaN/null financial fields → 0.0 (no unit scaling needed here)
     fields_to_sanitize = [
         "common_stock_units", "current_assets", "current_liabilities",
         "short_term_debt", "long_term_debt", "retained_earnings",
@@ -103,27 +122,18 @@ def preprocess_and_engineer_features(df: DataFrame) -> DataFrame:
             .otherwise(col(field))
         )
 
-    # 3. Sanitize cover-page market_cap (keep None/NaN as null – not 0)
+    # 2. Sanitize market_cap: keep only positive values; null/NaN/<=0 → null
     df = df.withColumn(
-        "cover_page_market_cap",
+        "market_cap",
         when(
             col("market_cap").isNull() | isnan(col("market_cap")) | (col("market_cap") <= 0),
             lit(None).cast("float")
         ).otherwise(col("market_cap"))
     )
 
-    # 4. Feature Engineering
+    # 3. Feature Engineering
     df = df.withColumn("total_liabilities", col("current_liabilities") + col("long_term_debt") + col("short_term_debt"))
     df = df.withColumn("ebit", col("net_income") + col("interest_expense") + col("tax_expense"))
-
-    # Resolve market_cap: prefer cover-page value; fall back to shares × price
-    df = df.withColumn(
-        "market_cap",
-        when(
-            col("cover_page_market_cap").isNotNull(),
-            col("cover_page_market_cap")
-        ).otherwise(col("common_stock_units") * col("clean_price"))
-    ).drop("cover_page_market_cap")
 
     return df
 
@@ -204,20 +214,46 @@ def process_micro_batch(batch_df: DataFrame, batch_id: int):
         for row in corrupted_rows:
             log_message(f"[Batch {batch_id}] REJECTED: Ticker '{row.ticker}' for Year '{row.year}'. Reason: Missing/NaN critical financial fields or Total Assets <= 0.", APP_NAME, "WARNING")
 
+    # --- MARKET CAP DATA QUALITY WARNING ---
+    if good_count > 0:
+        no_mcap_df = good_df.filter(col("Z_Score_Original").isNull())
+        no_mcap_count = no_mcap_df.count()
+        if no_mcap_count > 0:
+            log_message(
+                f"[Batch {batch_id}] MARKET CAP WARNING: {no_mcap_count} record(s) have no valid Market Cap. "
+                f"Z_Original skipped; only Z_Prime calculated.",
+                APP_NAME, "WARNING"
+            )
+            no_mcap_rows = no_mcap_df.select("ticker", "year").collect()
+            for row in no_mcap_rows:
+                log_message(
+                    f"[Batch {batch_id}] NO MARKET CAP: Ticker '{row.ticker}' Year '{row.year}' → Z_Original=N/A, Z_Prime only.",
+                    APP_NAME, "WARNING"
+                )
+
     # --- DASHBOARD GENERATION (Handling Clean Data) ---
     if good_count > 0:
         log_message(f"[Batch {batch_id}] Proceeding with {good_count} valid records.", APP_NAME, "INFO")
 
+        # Enrich with performance and anomaly analytics
+        enriched_df = enrich_with_analytics(good_df)
+
         print(f"\n=======================================================")
         print(f"📥 [BATCH {batch_id}] NEW VALID STREAM DATA")
         print(f"=======================================================")
-        good_df.select("ticker", "year", "Z_Score_Original", "Z_Score_Prime").show(truncate=False)
+        enriched_df.select(
+            upper(col("ticker")).alias("Company"),
+            "year",
+            "Z_Score_Original", "Health_Zone_Original",
+            "Z_Score_Prime", "Health_Zone_Prime",
+            "Performance", "Is_anomaly"
+        ).show(truncate=False)
         
-        # Write to Silver Storage
-        good_df.write.mode("append").parquet(SILVER_STORAGE_PATH)
+        # Write to Silver Storage (keep original ticker column for downstream joins)
+        enriched_df.write.mode("append").parquet(SILVER_STORAGE_PATH)
         
         # Read Full Historical Dataset for Gold Layer Dashboards
-        spark_session = good_df.sparkSession
+        spark_session = enriched_df.sparkSession
         history_df = spark_session.read.parquet(SILVER_STORAGE_PATH)
         history_df.createOrReplaceTempView("historical_scores")
 
@@ -237,15 +273,16 @@ def process_micro_batch(batch_df: DataFrame, batch_id: int):
         print(f"\n🏆 [BATCH {batch_id}] TOP-5 LEADERBOARD (By Modified Z'-Score)")
         spark_session.sql("""
             WITH RankedScores AS (
-                SELECT year, ticker, Z_Score_Prime, Health_Zone_Prime,
+                SELECT year, UPPER(ticker) as Company, Z_Score_Prime, Health_Zone_Prime,
+                       Performance, Is_anomaly,
                        RANK() OVER (PARTITION BY year ORDER BY Z_Score_Prime DESC) as rank
                 FROM historical_scores
             )
-            SELECT year, rank, ticker, Z_Score_Prime, Health_Zone_Prime
+            SELECT year, rank, Company, Z_Score_Prime, Health_Zone_Prime, Performance, Is_anomaly
             FROM RankedScores
             WHERE rank <= 5
             ORDER BY year DESC, rank ASC
-        """).show(n=50, truncate=False)
+        """).show(n=5, truncate=False)
         
         log_message(f"[Batch {batch_id}] Dashboards successfully recalculated.", APP_NAME, "INFO")
 
