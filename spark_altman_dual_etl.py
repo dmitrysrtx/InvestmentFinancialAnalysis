@@ -1,10 +1,18 @@
 """
-Streaming ETL Consumer for Altman Z-Score and Z'-Score.
-Features:
-- Dual-Scoring: Evaluates both Original and Prime formulas simultaneously.
-- Data Quality Gate (DLQ): Filters invalid raw data and writes to native logger.
-- Anti-Poisoning: Sanitizes NaNs and prevents Division by Zero in financial math.
-- Silver/Gold Materialization: Calculates global market averages and Top-5 Leaderboards.
+Streaming ETL Consumer for Altman Z-Score (Original) and Z'-Score (Prime).
+
+Pipeline stages:
+  1. Kafka ingestion  → parse JSON into structured DataFrame
+  2. Data Quality Gate → reject records with missing critical fields (DLQ logging)
+  3. Preprocessing     → sanitize NaN/null values, engineer derived features (EBIT, total_liabilities)
+  4. Dual Z-Score calc → compute both Original (market-cap) and Prime (book-value) scores
+  5. Analytics enrich  → add Performance (vs. batch avg) and Anomaly Detection (>2σ)
+  6. Silver persist    → append scored records to Parquet (local_storage/silver_scores/)
+  7. Gold dashboards   → compute market averages and Top-5 leaderboard from Silver data
+
+Market Cap handling:
+  - If market_cap is present and positive → Z_Score_Original is calculated.
+  - If market_cap is absent/invalid       → Z_Score_Original = null, only Z'-Score Prime is computed.
 """
 
 import os
@@ -59,6 +67,11 @@ def clean_silver_storage():
         log_message(f"Cleared previous state at {SILVER_STORAGE_PATH}", APP_NAME, "INFO")
 
 def get_schema() -> StructType:
+    """
+    Defines the expected JSON schema for incoming Kafka messages.
+    Fields arrive pre-normalized (absolute values) from the producer side.
+    The 'market_cap' field is optional — null/missing triggers Z'-Prime-only mode.
+    """
     return StructType([
         StructField("ticker", StringType(), True),
         StructField("year", IntegerType(), True),
@@ -139,8 +152,13 @@ def preprocess_and_engineer_features(df: DataFrame) -> DataFrame:
 
 def calculate_dual_z_scores(df: DataFrame) -> DataFrame:
     """
-    Computes Z-Score formulas using safe division. 
-    Applies final Anti-Poison filters to drop lingering NaNs.
+    Computes both Z-Score Original and Z'-Score Prime using safe division.
+
+    Z_Score_Original uses market_cap for X4 — if market_cap is null,
+    X4_Original propagates null, making Z_Score_Original null as well.
+    Z_Score_Prime always uses stockholders_equity (book value) for X4.
+
+    Applies final Anti-Poison filter to drop rows with NaN Z_Score_Prime.
     """
     # 1. Standard Ratios
     df = df.withColumn("X1", (col("current_assets") - col("current_liabilities")) / col("total_assets")) \
@@ -282,7 +300,7 @@ def process_micro_batch(batch_df: DataFrame, batch_id: int):
             FROM RankedScores
             WHERE rank <= 5
             ORDER BY year DESC, rank ASC
-        """).show(n=5, truncate=False)
+        """).show(n=50, truncate=False)
         
         log_message(f"[Batch {batch_id}] Dashboards successfully recalculated.", APP_NAME, "INFO")
 
