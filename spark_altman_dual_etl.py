@@ -7,7 +7,7 @@ Pipeline stages:
   3. Preprocessing     → sanitize NaN/null values, engineer derived features (EBIT, total_liabilities)
   4. Dual Z-Score calc → compute both Original (market-cap) and Prime (book-value) scores
   5. Analytics enrich  → add Performance (vs. batch avg) and Anomaly Detection (>2σ)
-  6. Silver persist    → append scored records to Parquet (local_storage/silver_scores/)
+  6. Silver persist    → upsert scored records to Parquet by (ticker, year) key (local_storage/silver_scores/)
   7. Gold dashboards   → compute market averages and Top-5 leaderboard from Silver data
 
 Market Cap handling:
@@ -18,7 +18,7 @@ Market Cap handling:
 import os
 import shutil
 from pyspark.sql import SparkSession, DataFrame
-from pyspark.sql.functions import col, from_json, when, lit, round, isnan, avg, stddev, abs, upper
+from pyspark.sql.functions import col, from_json, when, lit, round, isnan, avg, stddev, abs, upper, lower
 from pyspark.sql.window import Window
 from pyspark.sql.types import StructType, StructField, StringType, FloatType, IntegerType
 
@@ -27,7 +27,7 @@ from src.raw_features.logger import log_message
 
 # --- CONFIGURATION CONSTANTS ---
 KAFKA_BROKER = "localhost:9092"
-INPUT_TOPIC = "financial_reports" 
+INPUT_TOPIC = "raw_features" 
 APP_NAME = "Altman_Dual_Scoring_ETL"
 SILVER_STORAGE_PATH = "local_storage/silver_scores"
 
@@ -66,6 +66,80 @@ def clean_silver_storage():
         shutil.rmtree(SILVER_STORAGE_PATH)
         log_message(f"Cleared previous state at {SILVER_STORAGE_PATH}", APP_NAME, "INFO")
 
+def upsert_to_silver(new_df: DataFrame, spark_session: SparkSession, batch_id: int) -> DataFrame:
+    """
+    Upsert (merge) new records into the Silver Parquet storage.
+    
+    Composite key: (ticker, year).
+    - If a record with the same (ticker, year) already exists in Parquet,
+      it is replaced with the new incoming record (UPDATE).
+    - If no matching record exists, the new record is inserted (INSERT).
+    
+    Returns the full merged DataFrame (existing unchanged + new/updated).
+    """
+    has_parquet_files = (
+        os.path.exists(SILVER_STORAGE_PATH)
+        and any(f.endswith(".parquet") for f in os.listdir(SILVER_STORAGE_PATH))
+    )
+
+    SILVER_TMP_PATH = SILVER_STORAGE_PATH + "_tmp"
+
+    if has_parquet_files:
+        existing_df = spark_session.read.parquet(SILVER_STORAGE_PATH)
+        # Normalize tickers in existing data to lowercase.
+        # Old Parquet files may contain uppercase tickers from runs before
+        # the case-normalization fix was applied.
+        existing_df = existing_df.withColumn("ticker", lower(col("ticker")))
+        existing_count = existing_df.count()
+
+        # Identify which new records match existing (ticker, year) — these are UPDATEs
+        new_keys = new_df.select("ticker", "year")
+        updated_df = existing_df.join(new_keys, on=["ticker", "year"], how="inner")
+        updated_count = updated_df.count()
+        inserted_count = new_df.count() - updated_count
+
+        # Keep only existing records that are NOT being overwritten
+        unchanged_df = existing_df.join(new_keys, on=["ticker", "year"], how="left_anti")
+
+        # Merge: unchanged old records + all new records (updates + inserts)
+        merged_df = unchanged_df.unionByName(new_df, allowMissingColumns=True)
+
+        log_message(
+            f"[Batch {batch_id}] UPSERT: {existing_count} existing records in Silver. "
+            f"Incoming {new_df.count()}: {updated_count} UPDATED, {inserted_count} INSERTED.",
+            APP_NAME, "INFO"
+        )
+
+        if updated_count > 0:
+            updated_rows = updated_df.select("ticker", "year").collect()
+            for row in updated_rows:
+                log_message(
+                    f"[Batch {batch_id}] UPDATED: Ticker '{row.ticker}' Year {row.year} — replaced with fresh stream data.",
+                    APP_NAME, "INFO"
+                )
+    else:
+        merged_df = new_df
+        log_message(
+            f"[Batch {batch_id}] UPSERT: No existing Silver data. "
+            f"Inserting all {new_df.count()} records as new.",
+            APP_NAME, "INFO"
+        )
+
+    # Write to a temporary path first, then atomically swap.
+    # Writing directly to SILVER_STORAGE_PATH with mode("overwrite") would delete
+    # the source Parquet files while the lazy merged_df still references them.
+    if os.path.exists(SILVER_TMP_PATH):
+        shutil.rmtree(SILVER_TMP_PATH)
+    merged_df.write.mode("overwrite").parquet(SILVER_TMP_PATH)
+
+    # Swap: remove old Silver, rename tmp → Silver
+    if os.path.exists(SILVER_STORAGE_PATH):
+        shutil.rmtree(SILVER_STORAGE_PATH)
+    os.rename(SILVER_TMP_PATH, SILVER_STORAGE_PATH)
+
+    # Read from the freshly written path for downstream use
+    return spark_session.read.parquet(SILVER_STORAGE_PATH)
+
 def get_schema() -> StructType:
     """
     Defines the expected JSON schema for incoming Kafka messages.
@@ -97,7 +171,9 @@ def data_quality_gate(df: DataFrame) -> DataFrame:
     """
     critical_fields = [
         "current_assets", "current_liabilities", "total_assets", 
-        "retained_earnings", "stockholders_equity", "net_income", "total_revenue"
+        "retained_earnings", "stockholders_equity", "net_income", "total_revenue",
+        "current_liabilities", "long_term_debt", "short_term_debt",
+        "interest_expense", "tax_expense"
     ]
     
     is_valid_cond = col("ticker").isNotNull() & col("year").isNotNull()
@@ -257,7 +333,7 @@ def process_micro_batch(batch_df: DataFrame, batch_id: int):
         enriched_df = enrich_with_analytics(good_df)
 
         print(f"\n=======================================================")
-        print(f"📥 [BATCH {batch_id}] NEW VALID STREAM DATA")
+        print(f"[BATCH {batch_id}] NEW VALID STREAM DATA")
         print(f"=======================================================")
         enriched_df.select(
             upper(col("ticker")).alias("Company"),
@@ -265,14 +341,13 @@ def process_micro_batch(batch_df: DataFrame, batch_id: int):
             "Z_Score_Original", "Health_Zone_Original",
             "Z_Score_Prime", "Health_Zone_Prime",
             "Performance", "Is_anomaly"
-        ).show(truncate=False)
+        ).show(n=50, truncate=False)
         
-        # Write to Silver Storage (keep original ticker column for downstream joins)
-        enriched_df.write.mode("append").parquet(SILVER_STORAGE_PATH)
-        
-        # Read Full Historical Dataset for Gold Layer Dashboards
+        # Upsert to Silver Storage — merge with existing Parquet by (ticker, year)
         spark_session = enriched_df.sparkSession
-        history_df = spark_session.read.parquet(SILVER_STORAGE_PATH)
+        history_df = upsert_to_silver(enriched_df, spark_session, batch_id)
+        
+        # Use the full merged dataset for Gold Layer Dashboards
         history_df.createOrReplaceTempView("historical_scores")
 
         # 1. Market Averages
@@ -307,7 +382,11 @@ def process_micro_batch(batch_df: DataFrame, batch_id: int):
 if __name__ == "__main__":
     try:
         log_message(f"Initializing {APP_NAME}...", APP_NAME, "INFO")
-        clean_silver_storage()
+        # NOTE: clean_silver_storage() is intentionally NOT called here.
+        # Silver Parquet data persists across runs so the upsert logic in
+        # process_micro_batch() can detect existing (ticker, year) records
+        # and update them instead of creating duplicates.
+        # Call clean_silver_storage() manually if a full reset is needed.
 
         spark = SparkSession.builder \
             .appName(APP_NAME) \
@@ -326,6 +405,11 @@ if __name__ == "__main__":
         parsed_stream = raw_stream.select(
             from_json(col("value").cast("string"), get_schema()).alias("data")
         ).select("data.*")
+        
+        # Normalize ticker to lowercase for consistent upsert keys.
+        # The manual parser sends lowercase tickers; the API producer now does too,
+        # but this guard ensures any future producer also matches.
+        parsed_stream = parsed_stream.withColumn("ticker", lower(col("ticker")))
         
         # Execute Pipeline
         validated_stream = data_quality_gate(parsed_stream)

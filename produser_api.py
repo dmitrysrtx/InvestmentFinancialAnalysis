@@ -39,6 +39,7 @@ from __future__ import annotations
 import os
 import sys
 import json
+import math
 from typing import Dict, List, Optional, Tuple
 
 import yfinance as yf
@@ -47,7 +48,7 @@ from pyspark.sql import SparkSession
 
 # --- CONFIGURATION ---
 KAFKA_BROKER = 'localhost:9092'
-TOPIC_NAME = 'financial_reports'
+TOPIC_NAME = 'raw_features'
 APP_NAME = 'ProducerAPI'
 
 # Default list of tech companies to analyze
@@ -145,7 +146,7 @@ def fetch_financials_worker(
 
                     data = {
                         # --- Metadata ---
-                        'ticker': ticker,
+                        'ticker': ticker.lower(),
                         'year': year,
                         # --- Income Statement ---
                         'total_revenue': get_val(financials, 'Total Revenue'),
@@ -167,7 +168,15 @@ def fetch_financials_worker(
                         'close_price': close_price,
                         'market_cap': market_cap,
                     }
-                    results.append((ticker, year, json.dumps(data)))
+                    # Sanitize NaN/Inf → None before JSON serialization.
+                    # json.dumps(float('nan')) produces invalid JSON ("NaN")
+                    # that Spark's from_json cannot parse, causing the entire
+                    # record to be null and rejected by the Data Quality Gate.
+                    sanitized_data = {
+                        k: (None if isinstance(v, float) and (math.isnan(v) or math.isinf(v)) else v)
+                        for k, v in data.items()
+                    }
+                    results.append((ticker, year, json.dumps(sanitized_data)))
                 except Exception as e:
                     # Skip individual year on error; don't abort the whole ticker
                     pass
