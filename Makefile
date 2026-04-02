@@ -58,7 +58,7 @@ help:
 	@echo "  make raw_features do_export"
 	@echo "  make raw_features do_import"
 	@echo "  make run-altman-etl"
-	@echo "  make run-altman-zprime-etl"
+	@echo "  make run-altman-dual-etl"
 	@echo "  make run-producer"
 	@echo "  make run-producer start_year=2015 end_year=2022"
 	@echo "  make run-producer start_year=2023 end_year=2025"
@@ -158,7 +158,7 @@ run-producer:
 	END_YEAR="$(end_year)" \
 	TARGET_TICKER="$(ticker)" \
 	RAW_FEATURES_SPARK_PUBLISHER_ROOT="$(RAW_FEATURES_SPARK_PUBLISHER_ROOT)" \
-	"$(PYTHON)" produser_api.py
+	spark-submit produser_api.py
 
 demo-phase1:
 	@echo "=== INITIATING PHASE 1: Historical Data Loading (2015-2020) ==="
