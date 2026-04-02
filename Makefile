@@ -145,15 +145,7 @@ run-altman-dual-etl:
 	RAW_FEATURES_SPARK_PUBLISHER_ROOT="$(RAW_FEATURES_SPARK_PUBLISHER_ROOT)" \
 	spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.2.1 spark_altman_dual_etl.py
 
-run-altman-etl:
-	RAW_FEATURES_SPARK_PUBLISHER_ROOT="$(RAW_FEATURES_SPARK_PUBLISHER_ROOT)" \
-	spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.0 spark_altman_etl.py
-
-run-altman-zprime-etl:
-	RAW_FEATURES_SPARK_PUBLISHER_ROOT="$(RAW_FEATURES_SPARK_PUBLISHER_ROOT)" \
-	spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.0 spark_altman_zprime_etl.py
-
-run-producer:
+run-producer_api:
 	START_YEAR="$(start_year)" \
 	END_YEAR="$(end_year)" \
 	TARGET_TICKER="$(ticker)" \

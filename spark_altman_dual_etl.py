@@ -375,7 +375,7 @@ def process_micro_batch(batch_df: DataFrame, batch_id: int):
             FROM RankedScores
             WHERE rank <= 5
             ORDER BY year DESC, rank ASC
-        """).show(n=50, truncate=False)
+        """).show(n=5, truncate=False)
         
         log_message(f"[Batch {batch_id}] Dashboards successfully recalculated.", APP_NAME, "INFO")
 
