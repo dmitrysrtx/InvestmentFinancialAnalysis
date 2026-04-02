@@ -12,8 +12,10 @@ HTML parsing and Yahoo Finance API — calculates both Z-Scores on-the-fly, benc
 companies against the market, and maintains a **Real-Time Top 5 Leaderboard** of the 
 healthiest companies per year.
 
-All scored data is persisted to **Parquet** (Silver layer) for historical analysis 
-and Gold-layer dashboard generation.
+All scored data is persisted to **Parquet** (Silver layer) with **upsert semantics** —
+new records are inserted, and existing records (matched by `ticker + year`) are
+automatically updated. Gold-layer dashboards are regenerated from the full historical
+dataset after every micro-batch.
 
 **Key Features:**
 1. **Dual Financial Modeling:** Simultaneous calculation of Z-Score Original (market-cap) and Z'-Score Prime (book-value).
@@ -22,6 +24,7 @@ and Gold-layer dashboard generation.
 4. **Live Leaderboard:** A constantly updating "Top 5" list using Spark Window Functions.
 5. **Data Quality Gate (DLQ):** Filters and logs invalid/incomplete financial records.
 6. **Parquet Silver/Gold Architecture:** Durable storage for historical trend analysis.
+7. **Upsert (Update/Insert):** Records in the Parquet database are deduplicated by `(ticker, year)` — re-sending data for the same company and year automatically replaces the old record.
 
 ==============================================================================
 ARCHITECTURE & DATA FLOW
@@ -125,15 +128,24 @@ DATA STORAGE: PARQUET SILVER/GOLD ARCHITECTURE
 
 The system uses a **Lakehouse-style** storage pattern with Apache Parquet:
 
-* **Silver Layer** (`local_storage/silver_scores/`): Append-only Parquet files 
-  containing all scored records with full financial data, dual Z-Scores, Health Zones, 
-  Performance, and Anomaly flags.
+* **Silver Layer** (`local_storage/silver_scores/`): Parquet files containing all 
+  scored records with full financial data, dual Z-Scores, Health Zones, Performance, 
+  and Anomaly flags. Uses **upsert semantics** — composite key `(ticker, year)`:
+  - **INSERT** — new `(ticker, year)` combinations are appended.
+  - **UPDATE** — if a record with the same `(ticker, year)` already exists, it is 
+    replaced with the fresh incoming data.
+  - This applies regardless of which producer sent the data (Manual Parser or API).
 
-* **Gold Layer** (computed on read): Aggregated dashboards generated from Silver data:
+* **Gold Layer** (computed on read): Aggregated dashboards generated from the full 
+  merged Silver dataset after every micro-batch:
   - **Market Averages by Year** — Mean Z'-Score and Z-Score across all analyzed companies.
   - **Top-5 Leaderboard** — Best-performing companies ranked by Z'-Score per year.
 
-Silver storage is cleared on each application restart to ensure a clean demonstration state.
+Silver storage **persists across application restarts** to support incremental updates.
+To force a full reset, manually delete the directory:
+```bash
+rm -rf local_storage/silver_scores
+```
 
 ==============================================================================
 RAW_FEATURES EXTRACTOR (10-K HTML → KAFKA JSON)
@@ -203,14 +215,51 @@ Choose one of the two producer pipelines:
 
 **Option A — Manual Parser (10-K HTML filings):**
 ```bash
-make raw_features process
-make raw_features process company=aapl
+make raw_features process                                          # all companies, all years
+make raw_features process company=aapl                             # single company
+make raw_features process start_year=2020 end_year=2024            # year range
+make raw_features process company=aapl start_year=2023 end_year=2023  # single company + single year
 ```
 
 **Option B — API Producer (Yahoo Finance):**
 ```bash
-make run-producer start_year=2015 end_year=2022
-make run-producer ticker=AAPL start_year=2020 end_year=2022
+make run-producer start_year=2015 end_year=2022                    # all tickers, year range
+make run-producer ticker=AAPL start_year=2020 end_year=2022        # single ticker, year range
+make run-producer ticker=AAPL start_year=2023 end_year=2023        # single ticker, single year
+```
+
+### Updating Existing Records (Upsert)
+
+Both producers can be used to **update** records that already exist in the Parquet 
+database. The consumer identifies records by the composite key `(ticker, year)` and 
+automatically replaces old data with the new incoming values.
+
+**Example workflow — initial load then partial update:**
+
+```bash
+# Terminal 4: Start the consumer (keep it running)
+make run-altman-dual-etl
+
+# Terminal 3: Load initial data for 2020–2024 via Manual Parser
+make raw_features process start_year=2020 end_year=2024
+
+# Terminal 3: Update only AAPL's 2023 record via API Producer
+make run-producer ticker=AAPL start_year=2023 end_year=2023
+
+# Terminal 3: Re-fetch all companies for 2024 with fresh Yahoo Finance data
+make run-producer start_year=2024 end_year=2024
+```
+
+Each update triggers the consumer to:
+1. Read the existing Silver Parquet.
+2. Replace matching `(ticker, year)` records with new data (UPDATE).
+3. Keep all non-matching records unchanged.
+4. Write the merged result and regenerate Gold dashboards from the full dataset.
+
+The consumer logs every upsert operation:
+```
+[Batch 3] UPSERT: 60 existing records in Silver. Incoming 1: 1 UPDATED, 0 INSERTED.
+[Batch 3] UPDATED: Ticker 'aapl' Year 2023 — replaced with fresh stream data.
 ```
 
 ------------------------------------------------------------------------------
@@ -252,5 +301,17 @@ TROUBLESHOOTING
   `Z_Score_Original = null` and `Health_Zone_Original = "N/A - No Market Cap"`. 
   The Z'-Score Prime is always calculated using Book Value of Equity instead.
 
-* **Silver storage reset:** The `local_storage/silver_scores/` directory is cleared 
-  on each application restart to ensure a clean demonstration state.
+* **Silver storage persists across restarts.** The `local_storage/silver_scores/` 
+  directory is **not** cleared on application restart — this allows the upsert logic 
+  to detect and update existing records. To force a full reset:
+  ```bash
+  rm -rf local_storage/silver_scores
+  ```
+
+* **Duplicate records after update?** If you see duplicates for the same `(ticker, year)`, 
+  this may be caused by stale Parquet data from a previous version that stored tickers 
+  in a different case (e.g. `AAPL` vs `aapl`). The consumer now normalizes all tickers 
+  to lowercase. Clear Silver storage and re-run producers to resolve:
+  ```bash
+  rm -rf local_storage/silver_scores
+  ```
