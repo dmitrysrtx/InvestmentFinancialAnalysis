@@ -244,10 +244,10 @@ make run-altman-dual-etl
 make raw_features process start_year=2020 end_year=2024
 
 # Terminal 3: Update only AAPL's 2023 record via API Producer
-make run-producer ticker=AAPL start_year=2023 end_year=2023
+make run-producer_api ticker=AAPL start_year=2023 end_year=2023
 
 # Terminal 3: Re-fetch all companies for 2024 with fresh Yahoo Finance data
-make run-producer start_year=2024 end_year=2024
+make run-producer_api start_year=2024 end_year=2024
 ```
 
 Each update triggers the consumer to:
@@ -271,10 +271,6 @@ Performance/Anomaly analytics, and maintains the Top-5 Leaderboard.
 
 Uses `outputMode("append")` with `foreachBatch` for micro-batch processing 
 and Parquet-based historical aggregation.
-
-```bash
-spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.2.1 spark_altman_dual_etl.py
-```
 
 > **Expected Output:**
 > ```

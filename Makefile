@@ -27,7 +27,7 @@ help:
 	@echo "  raw_features            Supported component. See actions below."
 	@echo "  run-altman-etl          Run spark_altman_etl.py."
 	@echo "  run-altman-zprime-etl   Run spark_altman_zprime_etl.py."
-	@echo "  run-producer            Run produser.py (Kafka producer)."
+	@echo "  run-producer_api        Run producer_api.py (Kafka producer)."
 	@echo ""
 	@echo "Actions for 'raw_features':"
 	@echo "  process                 Run raw_features_spark_publisher.py."
@@ -59,10 +59,10 @@ help:
 	@echo "  make raw_features do_import"
 	@echo "  make run-altman-etl"
 	@echo "  make run-altman-dual-etl"
-	@echo "  make run-producer"
-	@echo "  make run-producer start_year=2015 end_year=2022"
-	@echo "  make run-producer start_year=2023 end_year=2025"
-	@echo "  make run-producer ticker=AAPL start_year=2020 end_year=2022"
+	@echo "  make run-producer_api"
+	@echo "  make run-producer_api start_year=2015 end_year=2022"
+	@echo "  make run-producer_api start_year=2023 end_year=2025"
+	@echo "  make run-producer_api ticker=AAPL start_year=2020 end_year=2022"
 
 raw_features:
 	@if [ "$(selected_component)" != "$(supported_component)" ]; then \
