@@ -422,7 +422,11 @@ def main() -> None:
     )
   )
 
+  current_year = None
   for year, company, serialized_metrics in publish_records:
+    if current_year is not None and year != current_year:
+      kafka_producer.flush()
+    current_year = year
     kafka_producer.produce(kafka_channel, key=company, value=serialized_metrics)
     kafka_producer.poll(0)
     log_message(
